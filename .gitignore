@@ -1,0 +1,8 @@
+*.skill
+node_modules/
+.env
+.env.local
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
