@@ -1,6 +1,6 @@
 # MercadoPago Integration - Claude Code Skill
 
-A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that helps you integrate **MercadoPago Checkout Pro** (redirect-based) into **Next.js + Supabase** applications.
+A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that helps you integrate **MercadoPago Checkout Pro** (redirect-based) into **Next.js** applications with **any PostgreSQL database**.
 
 ## What This Skill Does
 
@@ -12,19 +12,37 @@ When installed, Claude will automatically guide you through a complete MercadoPa
 - Purchase status verification API
 - Frontend checkout hook with double-submit prevention
 - Success/failure pages with server-side payment verification
-- Database schema (Supabase/PostgreSQL)
+- Database schema (standard PostgreSQL)
 
-Supports all MercadoPago countries: Argentina (ARS), Brazil (BRL), Mexico (MXN), Colombia (COP), Chile (CLP), Peru (PEN), Uruguay (UYU).
+### Database Support
+
+Works with any PostgreSQL database through a DB helper abstraction:
+
+| Adapter | Reference File |
+|---------|---------------|
+| **Supabase** | `references/database-supabase.md` |
+| **Prisma** (AWS RDS, Neon, etc.) | `references/database-prisma.md` |
+| **Raw pg / Drizzle / Kysely** | `references/database-postgresql.md` |
+
+### Country Support
+
+All MercadoPago countries: Argentina (ARS), Brazil (BRL), Mexico (MXN), Colombia (COP), Chile (CLP), Peru (PEN), Uruguay (UYU).
 
 ## Installation
 
-### Option 1: Install via Claude Code CLI
+### Option 1: Install via skills CLI
+
+```bash
+npx skills add martinacostadev/mercadopago-integration
+```
+
+### Option 2: Install via Claude Code CLI
 
 ```bash
 claude skill add --url https://github.com/martinacostadev/mercadopago-integration
 ```
 
-### Option 2: Manual Installation
+### Option 3: Manual Installation
 
 1. Clone this repository:
    ```bash
@@ -51,14 +69,14 @@ Once installed, just ask Claude naturally:
 
 ```
 Integrate MercadoPago Checkout Pro into my Next.js app.
-Currency: ARS. Success route: /pago-exitoso. Brand: MY_STORE.
+Database: Prisma. Currency: ARS. Success route: /pago-exitoso. Brand: MY_STORE.
 ```
 
 Or let Claude explore your codebase first:
 
 ```
 Integrate MercadoPago payments using the mercadopago-integration skill.
-Explore my codebase first to find the cart store and product model.
+Explore my codebase first to find the cart store, product model, and database setup.
 ```
 
 See `mercadopago-integration/references/usage-examples.md` for more prompt templates.
@@ -67,13 +85,16 @@ See `mercadopago-integration/references/usage-examples.md` for more prompt templ
 
 ```
 mercadopago-integration/
-  SKILL.md                          # Main skill instructions
+  SKILL.md                              # Main skill instructions
   references/
-    troubleshooting.md              # Common errors and fixes
-    countries.md                    # Currencies, test cards, payment methods
-    usage-examples.md               # Ready-to-use prompts
+    database-supabase.md                # Supabase DB helper
+    database-prisma.md                  # Prisma DB helper
+    database-postgresql.md              # Raw pg / Drizzle DB helper
+    troubleshooting.md                  # Common errors and fixes
+    countries.md                        # Currencies, test cards, payment methods
+    usage-examples.md                   # Ready-to-use prompts
   assets/
-    migration.sql                   # Database schema template
+    migration.sql                       # Standard PostgreSQL schema template
 ```
 
 ## Prerequisites
@@ -81,7 +102,7 @@ mercadopago-integration/
 Before using this skill, your project needs:
 
 - **Next.js** (App Router)
-- **Supabase** project with access to SQL Editor
+- **PostgreSQL database** (Supabase, AWS RDS, Neon, self-hosted, etc.)
 - **MercadoPago developer account** ([create one here](https://www.mercadopago.com/developers/panel/app))
 
 ## License

@@ -130,11 +130,7 @@ The webhook updates the real status. If the webhook hasn't arrived yet, status w
 **Fix:** Idempotency check before updating:
 
 ```typescript
-const { data: existing } = await supabase
-  .from('purchases')
-  .select('status')
-  .eq('id', externalReference)
-  .single();
+const existing = await getPurchaseStatus(externalReference);
 
 // Skip if already in terminal state
 if (existing?.status === 'approved' || existing?.status === 'rejected') {
@@ -200,7 +196,7 @@ const checkoutSchema = z.object({
 
 **Cause:** Several possible reasons:
 1. Webhook never arrived (localhost issue)
-2. Buyer used a payment method that requires time (e.g., Rapipago, PagoFacil)
+2. Buyer used a payment method that requires time (e.g., Rapipago, PagoFacil, Boleto, OXXO)
 3. MercadoPago is still processing
 
 **Fix:**

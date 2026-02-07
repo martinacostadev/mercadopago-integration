@@ -2,7 +2,8 @@
 name: mercadopago-integration
 description: >
   Integrate MercadoPago Checkout Pro (redirect-based) into Next.js applications with
-  Supabase as the database. Use when the user needs to: (1) Add MercadoPago payment
+  any PostgreSQL database (Supabase, AWS RDS, Neon, PlanetScale, self-hosted, Prisma,
+  Drizzle, or raw pg). Use when the user needs to: (1) Add MercadoPago payment
   processing to a Next.js app, (2) Create a checkout flow with MercadoPago, (3) Set up
   payment webhooks for MercadoPago, (4) Build payment success/failure pages, (5) Create
   a shopping cart with payment integration, (6) Troubleshoot MercadoPago integration
@@ -12,7 +13,7 @@ description: >
   all MercadoPago currencies (ARS, BRL, MXN, CLP, COP, PEN, UYU).
 ---
 
-# MercadoPago Checkout Pro - Next.js + Supabase
+# MercadoPago Checkout Pro - Next.js Integration
 
 Redirect-based payment flow: buyer clicks "Pay", is redirected to MercadoPago, completes payment, returns to the app. A webhook confirms the payment status in the background.
 
@@ -26,7 +27,12 @@ MercadoPago --webhook--> /api/webhooks/mercadopago --> Update DB
 
 ## Before Starting
 
-Gather or infer from the codebase:
+1. **Determine the database adapter.** Explore the codebase or ask the user:
+   - **Supabase?** See `references/database-supabase.md` for DB helper implementation
+   - **Prisma?** See `references/database-prisma.md` for DB helper implementation
+   - **Raw PostgreSQL (pg, Drizzle, or other)?** See `references/database-postgresql.md` for DB helper implementation
+
+2. **Gather or infer from the codebase:**
 
 | Detail | Why | Example |
 |--------|-----|---------|
@@ -35,7 +41,7 @@ Gather or infer from the codebase:
 | Brand name | Card statement descriptor | `MY_STORE` |
 | Product/item table | FK in `purchase_items` | `products`, `photos`, `courses` |
 | Cart store location | Hook reads items from it | `src/store/cart.ts` |
-| Supabase client path | API routes need it | `src/lib/supabase/server.ts` |
+| DB client path | API routes import it | `src/lib/supabase/server.ts`, `src/lib/prisma.ts` |
 
 ## Prerequisites
 
@@ -45,11 +51,45 @@ Gather or infer from the codebase:
    MERCADOPAGO_ACCESS_TOKEN=TEST-xxxx   # from https://www.mercadopago.com/developers/panel/app
    NEXT_PUBLIC_APP_URL=http://localhost:3000  # HTTPS in production
    ```
-3. Run database migration from `assets/migration.sql` in Supabase SQL Editor.
+3. Run database migration from `assets/migration.sql` (works on any PostgreSQL database).
 
 ## Implementation Steps
 
-### Step 1: MercadoPago Client
+### Step 1: Database Helper
+
+**Create:** `src/lib/db/purchases.ts`
+
+This abstracts all purchase DB operations. Implement using your DB adapter.
+See the reference file for your adapter:
+- Supabase: `references/database-supabase.md`
+- Prisma: `references/database-prisma.md`
+- Raw pg / other: `references/database-postgresql.md`
+
+The helper must export these functions:
+
+```typescript
+interface PurchaseInsert {
+  user_email: string;
+  status: 'pending';
+  total_amount: number;
+}
+
+interface PurchaseUpdate {
+  status?: 'pending' | 'approved' | 'rejected';
+  mercadopago_payment_id?: string;
+  mercadopago_preference_id?: string;
+  user_email?: string;
+  updated_at?: string;
+}
+
+// Required exports:
+export async function createPurchase(data: PurchaseInsert): Promise<{ id: string }>;
+export async function updatePurchase(id: string, data: PurchaseUpdate): Promise<void>;
+export async function getPurchaseStatus(id: string): Promise<{ id: string; status: string } | null>;
+export async function createPurchaseItems(purchaseId: string, items: { item_id: string; price: number }[]): Promise<void>;
+```
+
+### Step 2: MercadoPago Client
 
 **Create:** `src/lib/mercadopago/client.ts`
 
@@ -106,13 +146,13 @@ export async function getPayment(paymentId: string) {
 }
 ```
 
-### Step 2: Checkout API Route
+### Step 3: Checkout API Route
 
 **Create:** `src/app/api/checkout/route.ts`
 
 ```typescript
 import { NextResponse } from 'next/server';
-import { createServiceClient } from '@/lib/supabase/server';
+import { createPurchase, updatePurchase } from '@/lib/db/purchases';
 import { createPreference } from '@/lib/mercadopago/client';
 import { z } from 'zod';
 
@@ -137,28 +177,19 @@ export async function POST(request: Request) {
     const { items, email } = validation.data;
     const totalAmount = items.reduce((sum, i) => sum + i.unit_price * i.quantity, 0);
 
-    const supabase = await createServiceClient();
-    const { data: purchase, error: purchaseError } = await supabase
-      .from('purchases')
-      .insert({
-        user_email: email || 'pending@checkout',
-        status: 'pending',
-        total_amount: totalAmount,
-      })
-      .select().single();
-
-    if (purchaseError || !purchase) {
-      console.error('Error creating purchase:', purchaseError);
-      return NextResponse.json({ error: 'Failed to create purchase' }, { status: 500 });
-    }
+    const purchase = await createPurchase({
+      user_email: email || 'pending@checkout',
+      status: 'pending',
+      total_amount: totalAmount,
+    });
 
     const mpPreference = await createPreference({
       items, purchaseId: purchase.id, buyerEmail: email,
     });
 
-    await supabase.from('purchases')
-      .update({ mercadopago_preference_id: mpPreference.id })
-      .eq('id', purchase.id);
+    await updatePurchase(purchase.id, {
+      mercadopago_preference_id: mpPreference.id,
+    });
 
     return NextResponse.json({
       preferenceId: mpPreference.id,
@@ -172,13 +203,13 @@ export async function POST(request: Request) {
 }
 ```
 
-### Step 3: Webhook Handler
+### Step 4: Webhook Handler
 
 **Create:** `src/app/api/webhooks/mercadopago/route.ts`
 
 ```typescript
 import { NextResponse } from 'next/server';
-import { createServiceClient } from '@/lib/supabase/server';
+import { getPurchaseStatus, updatePurchase } from '@/lib/db/purchases';
 import { getPayment } from '@/lib/mercadopago/client';
 
 export async function POST(request: Request) {
@@ -198,22 +229,19 @@ export async function POST(request: Request) {
     if (payment.status === 'approved') status = 'approved';
     else if (['rejected', 'cancelled', 'refunded'].includes(payment.status || '')) status = 'rejected';
 
-    const supabase = await createServiceClient();
-
     // Idempotency: skip if already in terminal state
-    const { data: existing } = await supabase
-      .from('purchases').select('status').eq('id', payment.external_reference).single();
+    const existing = await getPurchaseStatus(payment.external_reference);
     if (existing?.status === 'approved' || existing?.status === 'rejected') {
       return NextResponse.json({ received: true });
     }
 
     const payerEmail = payment.payer?.email;
-    await supabase.from('purchases').update({
+    await updatePurchase(payment.external_reference, {
       status,
       mercadopago_payment_id: paymentId.toString(),
       ...(payerEmail ? { user_email: payerEmail } : {}),
       updated_at: new Date().toISOString(),
-    }).eq('id', payment.external_reference);
+    });
 
     return NextResponse.json({ received: true });
   } catch (error) {
@@ -228,29 +256,27 @@ export async function GET() {
 }
 ```
 
-### Step 4: Purchase Status API
+### Step 5: Purchase Status API
 
 **Create:** `src/app/api/purchases/[id]/route.ts`
 
 ```typescript
 import { NextResponse } from 'next/server';
-import { createServiceClient } from '@/lib/supabase/server';
+import { getPurchaseStatus } from '@/lib/db/purchases';
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const supabase = await createServiceClient();
-  const { data, error } = await supabase
-    .from('purchases').select('id, status').eq('id', id).single();
+  const data = await getPurchaseStatus(id);
 
-  if (error || !data) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  if (!data) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   return NextResponse.json({ id: data.id, status: data.status });
 }
 ```
 
-### Step 5: Checkout Hook (Frontend)
+### Step 6: Checkout Hook (Frontend)
 
 **Create:** `src/hooks/useCheckout.ts`
 
@@ -291,7 +317,7 @@ export function useCheckout() {
 }
 ```
 
-### Step 6: Success Page with Verification
+### Step 7: Success Page with Verification
 
 **Create:** `src/app/payment-success/page.tsx` (adjust route name)
 
@@ -332,7 +358,7 @@ export default function PaymentSuccessPage() {
 
 ## Critical Gotchas
 
-These are the most common pitfalls. For detailed solutions, see `references/troubleshooting.md`.
+For detailed solutions, see `references/troubleshooting.md`.
 
 | Gotcha | Fix |
 |--------|-----|
@@ -351,6 +377,7 @@ These are the most common pitfalls. For detailed solutions, see `references/trou
 - [ ] `MERCADOPAGO_ACCESS_TOKEN` in `.env` (TEST token for dev, never `NEXT_PUBLIC_`)
 - [ ] `NEXT_PUBLIC_APP_URL` in `.env` (HTTPS in production)
 - [ ] Database migration run (`purchases` + `purchase_items`)
+- [ ] DB helper implemented (`src/lib/db/purchases.ts`)
 - [ ] `/api/checkout` with Zod validation
 - [ ] `/api/webhooks/mercadopago` with idempotency check
 - [ ] `/api/purchases/[id]` for status verification
@@ -361,9 +388,12 @@ These are the most common pitfalls. For detailed solutions, see `references/trou
 
 ## References
 
+- `references/database-supabase.md` - Supabase DB helper implementation
+- `references/database-prisma.md` - Prisma DB helper implementation
+- `references/database-postgresql.md` - Raw PostgreSQL (pg, Drizzle, etc.) DB helper implementation
 - `references/troubleshooting.md` - Detailed error fixes and solutions
 - `references/countries.md` - Currencies, available countries, and MercadoPago specifics
 - `references/usage-examples.md` - Ready-to-use prompt templates
-- `assets/migration.sql` - Database schema template
+- `assets/migration.sql` - Database schema template (standard PostgreSQL)
 - [MercadoPago Checkout Pro Docs](https://www.mercadopago.com.ar/developers/es/docs/checkout-pro/landing)
 - [MercadoPago Node SDK](https://github.com/mercadopago/sdk-nodejs)
