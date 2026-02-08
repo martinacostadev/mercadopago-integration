@@ -2,16 +2,37 @@
 
 ## Table of Contents
 
+### Configuration Errors
 1. [auto_return + localhost = 400](#auto_return-localhost-400)
-2. [Failed to create purchase (NULL email)](#failed-to-create-purchase)
-3. [Hydration mismatch on checkout page](#hydration-mismatch)
-4. [Double purchase on double-click](#double-purchase)
-5. [Success page shows approved without real payment](#success-page-trust)
-6. [Webhook not received locally](#webhook-not-received)
-7. [Webhook duplicate updates](#webhook-duplicates)
-8. [useSearchParams error in App Router](#usesearchparams-error)
-9. [Preference creation fails with invalid items](#invalid-items)
-10. [Payment stuck in pending](#payment-stuck-pending)
+2. [invalid_notification_url](#invalid-notification-url)
+3. [Invalid Token (401)](#invalid-token)
+4. [Currency mismatch](#currency-mismatch)
+
+### Database Errors
+5. [Failed to create purchase (NULL email)](#failed-to-create-purchase)
+6. [Transaction amount too small](#transaction-amount-too-small)
+
+### Frontend Errors
+7. [Hydration mismatch on checkout page](#hydration-mismatch)
+8. [Double purchase on double-click](#double-purchase)
+9. [useSearchParams error in App Router](#usesearchparams-error)
+
+### Payment Flow Errors
+10. [Success page shows approved without real payment](#success-page-trust)
+11. [Webhook not received locally](#webhook-not-received)
+12. [Webhook duplicate updates](#webhook-duplicates)
+13. [Payment stuck in pending](#payment-stuck-pending)
+
+### API Errors
+14. [Preference creation fails with invalid items](#invalid-items)
+15. [Invalid users involved](#invalid-users)
+16. [Generic error "Ops, ocorreu um erro"](#generic-error)
+
+### Environment Errors
+17. [Node.js version incompatible](#node-version)
+18. [NPX not found](#npx-not-found)
+19. [Unauthorized use of live credentials](#unauthorized-credentials)
+20. [Mixed test/production credentials](#mixed-credentials)
 
 ---
 
@@ -34,6 +55,71 @@ const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
 
 ---
 
+## invalid_notification_url {#invalid-notification-url}
+
+**Error:** `notification_url attribute must be a valid url` (code: `invalid_notification_url`)
+
+**Cause:** The notification URL is malformed or exceeds 500 characters.
+
+**Fix:**
+1. Ensure URL is properly formatted: `https://yourdomain.com/api/webhooks/mercadopago`
+2. Keep URL under 500 characters
+3. Don't include query parameters in the base URL
+4. Verify the domain is accessible
+
+```typescript
+// Good
+notification_url: `${baseUrl}/api/webhooks/mercadopago`
+
+// Bad - query params in notification URL
+notification_url: `${baseUrl}/api/webhooks/mercadopago?token=abc`
+```
+
+---
+
+## Invalid Token (401) {#invalid-token}
+
+**Error:** HTTP 401 Unauthorized
+
+**Cause:** Access token is expired, invalid, or doesn't have required permissions.
+
+**Fix:**
+1. Verify token is correct (no extra spaces)
+2. Check token hasn't expired
+3. Regenerate from [Developer Panel](https://www.mercadopago.com/developers/panel/app)
+4. Ensure you're using the correct environment (TEST vs production)
+
+```bash
+# Test your credentials
+curl -X GET \
+  "https://api.mercadopago.com/v1/payment_methods" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
+```
+
+---
+
+## Currency mismatch {#currency-mismatch}
+
+**Error:** 400 Bad Request when creating preference
+
+**Cause:** The `currency_id` doesn't match the country of your MercadoPago account.
+
+**Fix:** Use the correct currency for your account's country:
+
+| Country | currency_id |
+|---------|-------------|
+| Argentina | `ARS` |
+| Brazil | `BRL` |
+| Mexico | `MXN` |
+| Colombia | `COP` |
+| Chile | `CLP` |
+| Peru | `PEN` |
+| Uruguay | `UYU` |
+
+**Note:** Cross-border payments are not supported. Each country needs its own MP account.
+
+---
+
 ## Failed to create purchase {#failed-to-create-purchase}
 
 **Error:** 500 from `/api/checkout` - `Failed to create purchase`
@@ -47,6 +133,29 @@ user_email: email || 'pending@checkout',
 ```
 
 MercadoPago collects the buyer's email during payment. The webhook updates `user_email` with the real payer email from `payment.payer.email`.
+
+---
+
+## Transaction amount too small {#transaction-amount-too-small}
+
+**Error:** `The value for transaction_amount is too small`
+
+**Cause:** MercadoPago has minimum amounts for card payments (approximately $15 ARS or equivalent).
+
+**Fix:**
+1. Ensure product prices meet minimum requirements
+2. For testing, use amounts above the minimum
+3. Consider showing error to user if cart total is too low
+
+```typescript
+const MIN_AMOUNT = 15; // Adjust per country
+
+if (totalAmount < MIN_AMOUNT) {
+  return NextResponse.json({
+    error: `Minimum purchase amount is $${MIN_AMOUNT}`
+  }, { status: 400 });
+}
+```
 
 ---
 
@@ -89,6 +198,31 @@ Also disable the button via `isSubmitting` state for visual feedback.
 
 ---
 
+## useSearchParams error {#usesearchparams-error}
+
+**Error:** `useSearchParams() should be wrapped in a suspense boundary at page...`
+
+**Cause:** Next.js App Router requires `useSearchParams()` to be inside a `<Suspense>` boundary.
+
+**Fix:**
+
+```tsx
+function SuccessContent() {
+  const searchParams = useSearchParams();
+  // ... component logic
+}
+
+export default function SuccessPage() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <SuccessContent />
+    </Suspense>
+  );
+}
+```
+
+---
+
 ## Success page shows approved without real payment {#success-page-trust}
 
 **Cause:** The page trusts the MercadoPago redirect URL parameters without verifying actual payment status in the database.
@@ -117,9 +251,14 @@ The webhook updates the real status. If the webhook hasn't arrived yet, status w
    ```
    Set `NEXT_PUBLIC_APP_URL` to the ngrok HTTPS URL (e.g., `https://abc123.ngrok-free.app`)
 
-2. **Sandbox testing:** Sandbox payments trigger webhooks if the notification URL is reachable.
+2. **localtunnel:**
+   ```bash
+   npx localtunnel --port 3000
+   ```
 
 3. **Local-only fallback:** For local testing, rely on the redirect flow. The success page will show `pending` since the webhook never updates the status. This is acceptable for development.
+
+**Production:** Ensure your webhook URL is publicly accessible and returns HTTP 200 within 500ms.
 
 ---
 
@@ -142,28 +281,20 @@ Always return `{ received: true }` even on errors to prevent MercadoPago from re
 
 ---
 
-## useSearchParams error {#usesearchparams-error}
+## Payment stuck in pending {#payment-stuck-pending}
 
-**Error:** `useSearchParams() should be wrapped in a suspense boundary at page...`
-
-**Cause:** Next.js App Router requires `useSearchParams()` to be inside a `<Suspense>` boundary.
+**Cause:** Several possible reasons:
+1. Webhook never arrived (localhost issue)
+2. Buyer used a payment method that requires time (e.g., Rapipago, PagoFacil, Boleto, OXXO)
+3. MercadoPago is still processing
 
 **Fix:**
-
-```tsx
-function SuccessContent() {
-  const searchParams = useSearchParams();
-  // ... component logic
-}
-
-export default function SuccessPage() {
-  return (
-    <Suspense fallback={<Loading />}>
-      <SuccessContent />
-    </Suspense>
-  );
-}
-```
+- In dev: Verify webhook is reachable (see "Webhook not received" above)
+- In production: This is normal for offline payment methods. Show appropriate UI:
+  ```
+  "Your payment is being processed. You'll receive an email when confirmed."
+  ```
+- Check MercadoPago dashboard for the payment status manually if needed
 
 ---
 
@@ -192,17 +323,118 @@ const checkoutSchema = z.object({
 
 ---
 
-## Payment stuck in pending {#payment-stuck-pending}
+## Invalid users involved {#invalid-users}
 
-**Cause:** Several possible reasons:
-1. Webhook never arrived (localhost issue)
-2. Buyer used a payment method that requires time (e.g., Rapipago, PagoFacil, Boleto, OXXO)
-3. MercadoPago is still processing
+**Error:** `invalid users involved`
+
+**Cause:** The buyer's email belongs to a test user while the seller's credentials are production (or vice versa).
+
+**Fix:** Ensure consistency:
+- **Testing:** Use test seller credentials + test buyer account
+- **Production:** Use production credentials + real buyer accounts
+
+Never mix test and production environments.
+
+---
+
+## Generic error "Ops, ocorreu um erro" {#generic-error}
+
+**Error:** Vague error message with no technical details
+
+**Cause:** This generic error can mean many things. Common causes:
+1. Mixed credentials (test/production)
+2. Invalid back_urls (not HTTPS)
+3. Webhook URL unreachable
+4. Preference misconfiguration
+
+**Fix:** Check all of these:
+- [ ] Credentials match environment (all test or all production)
+- [ ] back_urls are valid HTTPS URLs
+- [ ] notification_url is publicly accessible
+- [ ] Items have valid prices and quantities
+- [ ] Currency matches account country
+
+For debugging, check the MercadoPago dashboard for more details on failed payments.
+
+---
+
+## Node.js version incompatible {#node-version}
+
+**Error:** Syntax errors or module not found when using MCP Server
+
+**Cause:** Node.js version is below 20.
 
 **Fix:**
-- In dev: Verify webhook is reachable (see "Webhook not received" above)
-- In production: This is normal for offline payment methods. Show appropriate UI:
-  ```
-  "Your payment is being processed. You'll receive an email when confirmed."
-  ```
-- Check MercadoPago dashboard for the payment status manually if needed
+```bash
+# Check version
+node -v
+
+# Install Node.js 20+ with nvm
+nvm install 20
+nvm use 20
+```
+
+---
+
+## NPX not found {#npx-not-found}
+
+**Error:** `command not found: npx`
+
+**Cause:** NPM version is below 5.2.0 (npx was introduced in npm 5.2.0).
+
+**Fix:**
+```bash
+# Update npm
+npm install -g npm
+
+# Verify
+npx --version
+```
+
+---
+
+## Unauthorized use of live credentials {#unauthorized-credentials}
+
+**Error:** `Unauthorized use of live credentials`
+
+**Cause:** Trying to use production credentials in a test environment or with test user accounts.
+
+**Fix:**
+1. Use TEST credentials during development
+2. Don't use test buyer emails with production credentials
+3. Create separate applications for test and production
+
+---
+
+## Mixed test/production credentials {#mixed-credentials}
+
+**Error:** Payments work intermittently, fail with vague errors
+
+**Cause:** Using a mix of test and production credentials, or test buyer with production seller.
+
+**Fix:**
+1. **Development:** Use TEST Access Token + TEST buyer accounts
+2. **Production:** Use PRODUCTION Access Token + real buyer accounts
+3. Never mix them
+
+```env
+# Development
+MERCADOPAGO_ACCESS_TOKEN=TEST-xxxx
+
+# Production
+MERCADOPAGO_ACCESS_TOKEN=APP-xxxx
+```
+
+---
+
+## Quick Diagnosis Checklist
+
+When something fails, check in this order:
+
+1. **Credentials:** Correct token? Matches environment?
+2. **URLs:** All HTTPS? Publicly accessible?
+3. **Items:** Valid prices? Correct currency?
+4. **Environment:** Test with test, production with production?
+5. **Webhook:** Reachable? Returns 200?
+6. **Logs:** Check server logs for detailed errors
+7. **Dashboard:** Check MercadoPago developer dashboard for API errors

@@ -10,27 +10,92 @@ description: >
   issues (auto_return errors, webhook failures, hydration mismatches, double submissions).
   Triggers on requests mentioning MercadoPago, Mercado Pago, payment integration with MP,
   Argentine/Latin American payment processing, or checkout with MercadoPago. Supports
-  all MercadoPago currencies (ARS, BRL, MXN, CLP, COP, PEN, UYU).
+  all MercadoPago countries: Argentina (ARS), Brazil (BRL), Mexico (MXN), Colombia (COP),
+  Chile (CLP), Peru (PEN), Uruguay (UYU).
 ---
 
 # MercadoPago Checkout Pro - Next.js Integration
 
 Redirect-based payment flow: buyer clicks "Pay", is redirected to MercadoPago, completes payment, returns to the app. A webhook confirms the payment status in the background.
 
+## Quick Start
+
+For a minimal integration, just tell Claude:
+
 ```
-Pay button --> POST /api/checkout (create preference) --> Redirect to MercadoPago
-                                                               |
-MercadoPago --webhook--> /api/webhooks/mercadopago --> Update DB
-          |
-          +--redirect--> /payment-success?purchase=ID --> Verify via API
+Integrar MercadoPago en mi app
+```
+
+Claude will automatically explore your codebase to detect:
+- Database adapter (Supabase, Prisma, or raw pg)
+- Cart store location
+- Existing routes and patterns
+- Currency based on context
+
+For more control, provide details:
+
+```
+Integrate MercadoPago Checkout Pro.
+Database: Prisma. Currency: ARS. Success route: /pago-exitoso.
+```
+
+See `references/usage-examples.md` for more prompt templates.
+
+## Payment Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              PAYMENT FLOW                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+User clicks "Pay"
+       │
+       ▼
+┌──────────────────┐
+│ POST /api/checkout│
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│ 1. Create purchase in DB         │
+│    (status: pending)             │
+│ 2. Create preference in MP API   │
+│ 3. Save preference_id in DB      │
+│ 4. Return init_point URL         │
+└────────┬─────────────────────────┘
+         │
+         ▼
+┌──────────────────┐      ┌─────────────────────┐
+│ Redirect to MP   │─────▶│ User pays on MP     │
+└──────────────────┘      └──────────┬──────────┘
+                                     │
+         ┌───────────────────────────┴───────────────────────────┐
+         │                                                       │
+         ▼                                                       ▼
+┌─────────────────────────┐                        ┌─────────────────────────┐
+│ Redirect back to app    │                        │ MP sends webhook        │
+│ /payment-success?id=... │                        │ POST /api/webhooks/mp   │
+└──────────┬──────────────┘                        └──────────┬──────────────┘
+           │                                                  │
+           ▼                                                  ▼
+┌─────────────────────────┐                        ┌─────────────────────────┐
+│ Verify status via API   │                        │ Update purchase status  │
+│ GET /api/purchases/[id] │                        │ in database             │
+└──────────┬──────────────┘                        └─────────────────────────┘
+           │
+           ▼
+┌─────────────────────────┐
+│ Show UI based on status │
+│ approved/pending/rejected│
+└─────────────────────────┘
 ```
 
 ## Before Starting
 
 1. **Determine the database adapter.** Explore the codebase or ask the user:
-   - **Supabase?** See `references/database-supabase.md` for DB helper implementation
-   - **Prisma?** See `references/database-prisma.md` for DB helper implementation
-   - **Raw PostgreSQL (pg, Drizzle, or other)?** See `references/database-postgresql.md` for DB helper implementation
+   - **Supabase?** See `references/database-supabase.md`
+   - **Prisma?** See `references/database-prisma.md`
+   - **Raw PostgreSQL (pg, Drizzle, etc.)?** See `references/database-postgresql.md`
 
 2. **Gather or infer from the codebase:**
 
@@ -38,7 +103,7 @@ MercadoPago --webhook--> /api/webhooks/mercadopago --> Update DB
 |--------|-----|---------|
 | Currency | Preference creation | `ARS`, `BRL`, `MXN` (see `references/countries.md`) |
 | Success/failure routes | `back_urls` in preference | `/payment-success`, `/pago-exitoso` |
-| Brand name | Card statement descriptor | `MY_STORE` |
+| Brand name | Card statement descriptor | `MY_STORE` (max 22 chars) |
 | Product/item table | FK in `purchase_items` | `products`, `photos`, `courses` |
 | Cart store location | Hook reads items from it | `src/store/cart.ts` |
 | DB client path | API routes import it | `src/lib/supabase/server.ts`, `src/lib/prisma.ts` |
@@ -52,6 +117,12 @@ MercadoPago --webhook--> /api/webhooks/mercadopago --> Update DB
    NEXT_PUBLIC_APP_URL=http://localhost:3000  # HTTPS in production
    ```
 3. Run database migration from `assets/migration.sql` (works on any PostgreSQL database).
+
+### Production Requirements
+
+- **SSL Certificate**: Required for `auto_return` and secure webhooks
+- **Active MercadoPago seller account**: [Create here](https://www.mercadopago.com/developers/panel/app)
+- **Publicly accessible webhook URL**: MercadoPago must reach your `/api/webhooks/mercadopago`
 
 ## Implementation Steps
 
@@ -133,10 +204,14 @@ export async function createPreference({
       ...(baseUrl.startsWith('https') ? { auto_return: 'approved' as const } : {}),
       external_reference: purchaseId,
       notification_url: `${baseUrl}/api/webhooks/mercadopago`,
-      statement_descriptor: 'YOUR_BRAND', // Replace with user's brand
+      statement_descriptor: 'YOUR_BRAND', // Replace with user's brand (max 22 chars)
       expires: true,
       expiration_date_from: new Date().toISOString(),
       expiration_date_to: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    },
+    // Optional: Prevent duplicate preferences on retry
+    requestOptions: {
+      idempotencyKey: purchaseId,
     },
   });
 }
@@ -159,7 +234,7 @@ import { z } from 'zod';
 const checkoutSchema = z.object({
   items: z.array(z.object({
     id: z.string(),
-    title: z.string(),
+    title: z.string().min(1),
     quantity: z.number().positive(),
     unit_price: z.number().positive(),
   })).min(1),
@@ -215,6 +290,8 @@ import { getPayment } from '@/lib/mercadopago/client';
 export async function POST(request: Request) {
   try {
     const body = await request.json();
+
+    // Handle both IPN and webhook formats
     if (body.type !== 'payment' && body.action !== 'payment.created' && body.action !== 'payment.updated') {
       return NextResponse.json({ received: true });
     }
@@ -246,7 +323,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ received: true });
   } catch (error) {
     console.error('Webhook error:', error);
-    return NextResponse.json({ error: 'Webhook processing failed' }, { status: 500 });
+    // Always return 200 to prevent MercadoPago from retrying indefinitely
+    return NextResponse.json({ received: true });
   }
 }
 
@@ -347,14 +425,86 @@ function PaymentResult() {
 
   useEffect(() => { if (purchaseId) verify(purchaseId); }, [purchaseId, verify]);
 
-  // Render UI based on status: loading/approved/pending/rejected/error
-  return <div>{/* Customize UI per status */}</div>;
+  if (status === 'loading') {
+    return <div>Verifying payment...</div>;
+  }
+
+  if (status === 'approved') {
+    return (
+      <div>
+        <h1>Payment Successful!</h1>
+        <p>Thank you for your purchase.</p>
+      </div>
+    );
+  }
+
+  if (status === 'pending') {
+    return (
+      <div>
+        <h1>Payment Pending</h1>
+        <p>Your payment is being processed.</p>
+        <p>You'll receive an email when confirmed.</p>
+        <p>This may take 1-3 business days for offline payment methods.</p>
+      </div>
+    );
+  }
+
+  if (status === 'rejected') {
+    return (
+      <div>
+        <h1>Payment Failed</h1>
+        <p>Your payment could not be processed.</p>
+        <p>Please try again or use a different payment method.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <h1>Error</h1>
+      <p>Could not verify payment status. Please contact support.</p>
+    </div>
+  );
 }
 
 export default function PaymentSuccessPage() {
   return <Suspense fallback={<div>Loading...</div>}><PaymentResult /></Suspense>;
 }
 ```
+
+## Checklist
+
+### Configuration
+
+- [ ] `mercadopago` + `zod` installed
+- [ ] `MERCADOPAGO_ACCESS_TOKEN` in `.env` (TEST token for dev, never `NEXT_PUBLIC_`)
+- [ ] `NEXT_PUBLIC_APP_URL` in `.env` (HTTPS in production)
+- [ ] Database migration run (`purchases` + `purchase_items`)
+
+### Backend Implementation
+
+- [ ] DB helper implemented (`src/lib/db/purchases.ts`)
+- [ ] MercadoPago client with `createPreference` and `getPayment`
+- [ ] `/api/checkout` with Zod validation
+- [ ] `/api/webhooks/mercadopago` with idempotency check
+- [ ] `/api/purchases/[id]` for status verification
+
+### Frontend Implementation
+
+- [ ] Checkout hook with `useRef` guard (prevents double submit)
+- [ ] Success page verifies status via API (not trusting redirect)
+- [ ] Pending status UI for offline payments
+- [ ] `useSearchParams` wrapped in `<Suspense>`
+- [ ] Hydration guard for localStorage-based cart
+
+### Production Readiness
+
+- [ ] `NEXT_PUBLIC_APP_URL` uses HTTPS
+- [ ] `auto_return` enabled (only works with HTTPS)
+- [ ] Webhook URL publicly accessible
+- [ ] Production credentials (not TEST-)
+- [ ] Statement descriptor set (max 22 chars)
+- [ ] Error logging configured
 
 ## Critical Gotchas
 
@@ -364,36 +514,36 @@ For detailed solutions, see `references/troubleshooting.md`.
 |--------|-----|
 | `auto_return` + localhost = 400 error | Only set when URL starts with `https` |
 | `user_email NOT NULL` + no email = 500 | Use `'pending@checkout'` placeholder; webhook updates it |
+| `currency_id` doesn't match account country | Use correct currency (ARS for Argentina, BRL for Brazil, etc.) |
 | Hydration mismatch (localStorage cart) | Add `mounted` state guard before rendering cart content |
 | Double purchase on double-click | Use `useRef` guard, not just `useState` |
 | Success page trusts redirect URL | Always verify via `/api/purchases/[id]` |
 | Webhook duplicate updates | Check if purchase is already terminal before updating |
 | Webhooks can't reach localhost | Use ngrok: `ngrok http 3000` |
 | `useSearchParams` error | Wrap component in `<Suspense>` |
-
-## Checklist
-
-- [ ] `mercadopago` + `zod` installed
-- [ ] `MERCADOPAGO_ACCESS_TOKEN` in `.env` (TEST token for dev, never `NEXT_PUBLIC_`)
-- [ ] `NEXT_PUBLIC_APP_URL` in `.env` (HTTPS in production)
-- [ ] Database migration run (`purchases` + `purchase_items`)
-- [ ] DB helper implemented (`src/lib/db/purchases.ts`)
-- [ ] `/api/checkout` with Zod validation
-- [ ] `/api/webhooks/mercadopago` with idempotency check
-- [ ] `/api/purchases/[id]` for status verification
-- [ ] Success page verifies status (not trusting redirect)
-- [ ] `auto_return` only for HTTPS
-- [ ] Checkout hook prevents double submit
-- [ ] `useSearchParams` wrapped in `<Suspense>`
+| Payment stuck in pending | Normal for offline methods (OXXO, Rapipago, Boleto) |
+| Mixed test/production credentials | Never mix - use all TEST or all PROD |
 
 ## References
 
+### Database Adapters
 - `references/database-supabase.md` - Supabase DB helper implementation
 - `references/database-prisma.md` - Prisma DB helper implementation
 - `references/database-postgresql.md` - Raw PostgreSQL (pg, Drizzle, etc.) DB helper implementation
-- `references/troubleshooting.md` - Detailed error fixes and solutions
-- `references/countries.md` - Currencies, available countries, and MercadoPago specifics
+
+### Configuration
+- `references/countries.md` - Currencies, test cards, payment methods by country
+- `references/testing.md` - Complete testing guide with test cards and simulated results
+- `references/mcp-server.md` - MercadoPago MCP Server for AI integration
+
+### Help
+- `references/troubleshooting.md` - 20+ common errors and solutions
 - `references/usage-examples.md` - Ready-to-use prompt templates
+
+### Assets
 - `assets/migration.sql` - Database schema template (standard PostgreSQL)
+
+### External Links
 - [MercadoPago Checkout Pro Docs](https://www.mercadopago.com.ar/developers/es/docs/checkout-pro/landing)
 - [MercadoPago Node SDK](https://github.com/mercadopago/sdk-nodejs)
+- [Developer Panel](https://www.mercadopago.com/developers/panel/app)

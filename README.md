@@ -63,9 +63,15 @@ claude skill add --url https://github.com/martinacostadev/mercadopago-integratio
    Integrate MercadoPago payments into my app
    ```
 
-## Usage
+## Quick Start
 
-Once installed, just ask Claude naturally:
+Just ask Claude naturally:
+
+```
+Integrar MercadoPago en mi app
+```
+
+Or with more details:
 
 ```
 Integrate MercadoPago Checkout Pro into my Next.js app.
@@ -90,8 +96,10 @@ mercadopago-integration/
     database-supabase.md                # Supabase DB helper
     database-prisma.md                  # Prisma DB helper
     database-postgresql.md              # Raw pg / Drizzle DB helper
-    troubleshooting.md                  # Common errors and fixes
+    troubleshooting.md                  # 20+ common errors and fixes
+    testing.md                          # Complete testing guide
     countries.md                        # Currencies, test cards, payment methods
+    mcp-server.md                       # MercadoPago MCP Server documentation
     usage-examples.md                   # Ready-to-use prompts
   assets/
     migration.sql                       # Standard PostgreSQL schema template
@@ -104,6 +112,30 @@ Before using this skill, your project needs:
 - **Next.js** (App Router)
 - **PostgreSQL database** (Supabase, AWS RDS, Neon, self-hosted, etc.)
 - **MercadoPago developer account** ([create one here](https://www.mercadopago.com/developers/panel/app))
+
+## Documentation
+
+### Testing
+See `references/testing.md` for:
+- Test card numbers by country
+- Simulating different payment outcomes (approved, rejected, pending)
+- Setting up test accounts
+- Testing webhooks locally with ngrok
+
+### Troubleshooting
+See `references/troubleshooting.md` for solutions to 20+ common issues:
+- `auto_return` errors
+- Webhook not receiving notifications
+- Currency/credential mismatches
+- Hydration errors
+- And more...
+
+### Countries & Payment Methods
+See `references/countries.md` for:
+- Supported currencies by country
+- Test cards for each country
+- Available payment methods (cards, cash, bank transfer)
+- Offline payment handling (Rapipago, OXXO, Boleto, etc.)
 
 ## License
 
