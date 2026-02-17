@@ -40,14 +40,21 @@ Add to your MCP configuration:
   "mcpServers": {
     "mercadopago": {
       "command": "npx",
-      "args": ["-y", "@mercadopago/mcp-server"],
+      "args": [
+        "-y", "mcp-remote@0.1.38",
+        "https://mcp.mercadopago.com/mcp",
+        "--header",
+        "Authorization:${AUTH_HEADER}"
+      ],
       "env": {
-        "MP_ACCESS_TOKEN": "your-access-token"
+        "AUTH_HEADER": "Bearer your-access-token"
       }
     }
   }
 }
 ```
+
+> **Note:** Pin `mcp-remote` to a specific version (shown: `0.1.38`). Check [npm](https://www.npmjs.com/package/mcp-remote) for the latest version before updating.
 
 ### Claude Desktop
 
@@ -58,9 +65,14 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "mercadopago": {
       "command": "npx",
-      "args": ["-y", "@mercadopago/mcp-server"],
+      "args": [
+        "-y", "mcp-remote@0.1.38",
+        "https://mcp.mercadopago.com/mcp",
+        "--header",
+        "Authorization:${AUTH_HEADER}"
+      ],
       "env": {
-        "MP_ACCESS_TOKEN": "your-access-token"
+        "AUTH_HEADER": "Bearer your-access-token"
       }
     }
   }

@@ -12,6 +12,8 @@ description: >
   Argentine/Latin American payment processing, or checkout with MercadoPago. Supports
   all MercadoPago countries: Argentina (ARS), Brazil (BRL), Mexico (MXN), Colombia (COP),
   Chile (CLP), Peru (PEN), Uruguay (UYU).
+  This skill generates code for developer review — it does not execute financial
+  transactions directly. All payment code requires human approval before deployment.
 ---
 
 # MercadoPago Checkout Pro - Next.js Integration
@@ -108,6 +110,20 @@ User clicks "Pay"
 | Cart store location | Hook reads items from it | `src/store/cart.ts` |
 | DB client path | API routes import it | `src/lib/supabase/server.ts`, `src/lib/prisma.ts` |
 
+## Security
+
+### Human-in-the-loop
+
+Always present payment-related code for user review before writing it. Never auto-execute checkout, webhook, or payment code without explicit user confirmation. This skill generates code — it does not execute financial transactions directly.
+
+### Webhook signature verification
+
+The generated webhook handler includes HMAC-SHA256 verification using MercadoPago's `x-signature` header and the `MERCADOPAGO_WEBHOOK_SECRET` environment variable. This prevents unauthorized actors from calling your webhook endpoint with forged payment notifications.
+
+### Amount validation
+
+The checkout route includes a configurable `MAX_CHECKOUT_AMOUNT` server-side limit. Requests exceeding this amount are rejected before reaching MercadoPago. Adjust the limit per your business requirements.
+
 ## Prerequisites
 
 1. Install dependencies: `npm install mercadopago zod`
@@ -115,6 +131,7 @@ User clicks "Pay"
    ```env
    MERCADOPAGO_ACCESS_TOKEN=TEST-xxxx   # from https://www.mercadopago.com/developers/panel/app
    NEXT_PUBLIC_APP_URL=http://localhost:3000  # HTTPS in production
+   MERCADOPAGO_WEBHOOK_SECRET=your-webhook-secret  # from Developer Panel > Webhooks
    ```
 3. Run database migration from `assets/migration.sql` (works on any PostgreSQL database).
 
@@ -252,6 +269,11 @@ export async function POST(request: Request) {
     const { items, email } = validation.data;
     const totalAmount = items.reduce((sum, i) => sum + i.unit_price * i.quantity, 0);
 
+    const MAX_CHECKOUT_AMOUNT = 500_000; // Configure per business needs
+    if (totalAmount > MAX_CHECKOUT_AMOUNT) {
+      return NextResponse.json({ error: 'Amount exceeds maximum allowed' }, { status: 400 });
+    }
+
     const purchase = await createPurchase({
       user_email: email || 'pending@checkout',
       status: 'pending',
@@ -284,12 +306,54 @@ export async function POST(request: Request) {
 
 ```typescript
 import { NextResponse } from 'next/server';
+import { createHmac } from 'crypto';
 import { getPurchaseStatus, updatePurchase } from '@/lib/db/purchases';
 import { getPayment } from '@/lib/mercadopago/client';
 
+const WEBHOOK_SECRET = process.env.MERCADOPAGO_WEBHOOK_SECRET;
+// WARNING: If MERCADOPAGO_WEBHOOK_SECRET is not set, webhook signature
+// verification is disabled. Set it in production to prevent forged requests.
+
+function verifyWebhookSignature(request: Request, body: string): boolean {
+  if (!WEBHOOK_SECRET) return true; // Skip verification if secret not configured
+
+  const xSignature = request.headers.get('x-signature');
+  const xRequestId = request.headers.get('x-request-id');
+  if (!xSignature || !xRequestId) return false;
+
+  // Parse ts and v1 from x-signature header
+  const parts = Object.fromEntries(
+    xSignature.split(',').map((part) => {
+      const [key, ...rest] = part.trim().split('=');
+      return [key, rest.join('=')];
+    })
+  );
+  const ts = parts['ts'];
+  const hash = parts['v1'];
+  if (!ts || !hash) return false;
+
+  // Parse data.id from body
+  const parsed = JSON.parse(body);
+  const dataId = parsed?.data?.id;
+
+  // Build the template string per MercadoPago docs
+  const template = `id:${dataId};request-id:${xRequestId};ts:${ts};`;
+  const expected = createHmac('sha256', WEBHOOK_SECRET)
+    .update(template)
+    .digest('hex');
+
+  return expected === hash;
+}
+
 export async function POST(request: Request) {
   try {
-    const body = await request.json();
+    const rawBody = await request.text();
+
+    if (!verifyWebhookSignature(request, rawBody)) {
+      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+    }
+
+    const body = JSON.parse(rawBody);
 
     // Handle both IPN and webhook formats
     if (body.type !== 'payment' && body.action !== 'payment.created' && body.action !== 'payment.updated') {
@@ -496,6 +560,13 @@ export default function PaymentSuccessPage() {
 - [ ] Pending status UI for offline payments
 - [ ] `useSearchParams` wrapped in `<Suspense>`
 - [ ] Hydration guard for localStorage-based cart
+
+### Security
+
+- [ ] `MERCADOPAGO_WEBHOOK_SECRET` configured
+- [ ] Webhook signature verification enabled
+- [ ] `MAX_CHECKOUT_AMOUNT` set per business rules
+- [ ] All payment code reviewed before deployment
 
 ### Production Readiness
 
