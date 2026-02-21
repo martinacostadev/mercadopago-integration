@@ -4,7 +4,7 @@ Implementation of `src/lib/db/purchases.ts` using `pg` (node-postgres) directly.
 
 ## Prerequisites
 
-- `pg` installed: `npm install pg`
+- [`pg`](https://www.npmjs.com/package/pg) installed: `npm install pg@^8`
 - PostgreSQL database (AWS RDS, Neon, self-hosted, etc.)
 - Run `assets/migration.sql` against your database
 
@@ -23,7 +23,9 @@ import { Pool } from 'pg';
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 10,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : undefined,
+  // rejectUnauthorized: true ensures the server certificate is verified against CAs.
+  // If your provider uses a custom CA, pass `ca: fs.readFileSync('/path/to/ca.pem')` instead.
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: true } : undefined,
 });
 
 export default pool;
@@ -59,33 +61,62 @@ export async function createPurchase(data: PurchaseInsert) {
   return rows[0];
 }
 
-export async function updatePurchase(id: string, data: PurchaseUpdate) {
+// Whitelist of columns allowed in dynamic UPDATE queries to prevent SQL injection via key names.
+const ALLOWED_UPDATE_COLUMNS = new Set<string>([
+  'status', 'mercadopago_payment_id', 'mercadopago_preference_id', 'user_email', 'updated_at',
+]);
+
+function buildUpdateFields(data: PurchaseUpdate) {
   const fields: string[] = [];
   const values: unknown[] = [];
   let idx = 1;
 
   for (const [key, value] of Object.entries(data)) {
     if (value !== undefined) {
+      if (!ALLOWED_UPDATE_COLUMNS.has(key)) {
+        throw new Error(`Invalid update column: ${key}`);
+      }
       fields.push(`${key} = $${idx++}`);
       values.push(value);
     }
   }
 
+  return { fields, values, nextIdx: idx };
+}
+
+export async function updatePurchase(id: string, data: PurchaseUpdate) {
+  const { fields, values, nextIdx } = buildUpdateFields(data);
   if (fields.length === 0) return;
 
   values.push(id);
   await pool.query(
-    `UPDATE purchases SET ${fields.join(', ')} WHERE id = $${idx}`,
+    `UPDATE purchases SET ${fields.join(', ')} WHERE id = $${nextIdx}`,
     values
   );
 }
 
 export async function getPurchaseStatus(id: string) {
   const { rows } = await pool.query(
-    `SELECT id, status FROM purchases WHERE id = $1`,
+    `SELECT id, status, total_amount FROM purchases WHERE id = $1`,
     [id]
   );
   return rows[0] || null;
+}
+
+export async function updatePurchaseStatusAtomically(
+  id: string,
+  expectedStatus: string,
+  data: PurchaseUpdate
+): Promise<boolean> {
+  const { fields, values, nextIdx } = buildUpdateFields(data);
+  if (fields.length === 0) return false;
+
+  values.push(id, expectedStatus);
+  const { rowCount } = await pool.query(
+    `UPDATE purchases SET ${fields.join(', ')} WHERE id = $${nextIdx} AND status = $${nextIdx + 1}`,
+    values
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 export async function createPurchaseItems(
@@ -141,7 +172,7 @@ export const purchaseItems = pgTable('purchase_items', {
 // src/lib/db/purchases.ts
 import { db } from '@/lib/db/drizzle';
 import { purchases, purchaseItems } from './schema';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 export async function createPurchase(data: { user_email: string; status: 'pending'; total_amount: number }) {
   const [purchase] = await db.insert(purchases).values(data).returning({ id: purchases.id });
@@ -153,9 +184,19 @@ export async function updatePurchase(id: string, data: Record<string, unknown>) 
 }
 
 export async function getPurchaseStatus(id: string) {
-  const [purchase] = await db.select({ id: purchases.id, status: purchases.status })
+  const [purchase] = await db.select({ id: purchases.id, status: purchases.status, total_amount: purchases.total_amount })
     .from(purchases).where(eq(purchases.id, id));
   return purchase || null;
+}
+
+export async function updatePurchaseStatusAtomically(
+  id: string,
+  expectedStatus: string,
+  data: Record<string, unknown>
+): Promise<boolean> {
+  const result = await db.update(purchases).set(data)
+    .where(and(eq(purchases.id, id), eq(purchases.status, expectedStatus)));
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function createPurchaseItems(purchaseId: string, items: { item_id: string; price: number }[]) {

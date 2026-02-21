@@ -67,12 +67,32 @@ export async function getPurchaseStatus(id: string) {
   const supabase = await createServiceClient();
   const { data, error } = await supabase
     .from('purchases')
-    .select('id, status')
+    .select('id, status, total_amount')
     .eq('id', id)
     .single();
 
   if (error || !data) return null;
   return data;
+}
+
+export async function updatePurchaseStatusAtomically(
+  id: string,
+  expectedStatus: string,
+  data: PurchaseUpdate
+): Promise<boolean> {
+  const supabase = await createServiceClient();
+  const { data: updated, error } = await supabase
+    .from('purchases')
+    .update(data)
+    .eq('id', id)
+    .eq('status', expectedStatus)
+    .select('id');
+
+  if (error) {
+    console.error('Error updating purchase atomically:', error);
+    throw new Error('Failed to update purchase atomically');
+  }
+  return (updated?.length ?? 0) > 0;
 }
 
 export async function createPurchaseItems(

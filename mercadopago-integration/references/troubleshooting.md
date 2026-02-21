@@ -90,7 +90,7 @@ notification_url: `${baseUrl}/api/webhooks/mercadopago?token=abc`
 4. Ensure you're using the correct environment (TEST vs production)
 
 ```bash
-# Test your credentials
+# Review before running — calls official MercadoPago API
 curl -X GET \
   "https://api.mercadopago.com/v1/payment_methods" \
   -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
@@ -247,12 +247,14 @@ The webhook updates the real status. If the webhook hasn't arrived yet, status w
 
 1. **ngrok (recommended for dev):**
    ```bash
+   # Development only — https://www.npmjs.com/package/ngrok
    ngrok http 3000
    ```
    Set `NEXT_PUBLIC_APP_URL` to the ngrok HTTPS URL (e.g., `https://abc123.ngrok-free.app`)
 
 2. **localtunnel:**
    ```bash
+   # Development only — https://www.npmjs.com/package/localtunnel
    npx localtunnel --port 3000
    ```
 
@@ -266,18 +268,19 @@ The webhook updates the real status. If the webhook hasn't arrived yet, status w
 
 **Cause:** MercadoPago retries webhooks if it doesn't get a 2xx response, or sends multiple notifications for the same payment event.
 
-**Fix:** Idempotency check before updating:
+**Fix:** Use an atomic update that only modifies the row if it's still in the expected state:
 
 ```typescript
-const existing = await getPurchaseStatus(externalReference);
-
-// Skip if already in terminal state
-if (existing?.status === 'approved' || existing?.status === 'rejected') {
-  return NextResponse.json({ received: true });
-}
+// Atomic: only updates if status is still 'pending'. No-op if already terminal.
+const updated = await updatePurchaseStatusAtomically(externalReference, 'pending', {
+  status,
+  mercadopago_payment_id: paymentId.toString(),
+  updated_at: new Date().toISOString(),
+});
+// updated === false means the purchase was already in a terminal state
 ```
 
-Always return `{ received: true }` even on errors to prevent MercadoPago from retrying indefinitely.
+This prevents race conditions where two concurrent webhooks could both pass a check-then-act guard. Always return `{ received: true }` even on errors to prevent MercadoPago from retrying indefinitely.
 
 ---
 
@@ -360,7 +363,7 @@ For debugging, check the MercadoPago dashboard for more details on failed paymen
 
 ## Node.js version incompatible {#node-version}
 
-**Error:** Syntax errors or module not found when using MCP Server
+**Error:** Syntax errors or module not found
 
 **Cause:** Node.js version is below 20.
 
@@ -369,7 +372,7 @@ For debugging, check the MercadoPago dashboard for more details on failed paymen
 # Check version
 node -v
 
-# Install Node.js 20+ with nvm
+# Install Node.js 20+ with nvm — https://github.com/nvm-sh/nvm
 nvm install 20
 nvm use 20
 ```
@@ -384,7 +387,7 @@ nvm use 20
 
 **Fix:**
 ```bash
-# Update npm
+# Global install — review before running
 npm install -g npm
 
 # Verify

@@ -115,10 +115,12 @@ The **cardholder name** determines the payment outcome:
 
 MercadoPago webhooks require a publicly accessible URL.
 
+> **Note:** Tunneling tools (ngrok, localtunnel) are for **local development only**. Never use them to expose production services.
+
 ### Option 1: ngrok (Recommended)
 
 ```bash
-# Install ngrok
+# Development only — https://www.npmjs.com/package/ngrok
 npm install -g ngrok
 
 # Start tunnel
@@ -133,6 +135,7 @@ ngrok http 3000
 ### Option 2: localtunnel
 
 ```bash
+# Development only — https://www.npmjs.com/package/localtunnel
 npx localtunnel --port 3000
 ```
 

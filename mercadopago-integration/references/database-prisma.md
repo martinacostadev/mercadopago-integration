@@ -4,7 +4,7 @@ Implementation of `src/lib/db/purchases.ts` using Prisma ORM.
 
 ## Prerequisites
 
-- `prisma` and `@prisma/client` installed
+- [`prisma`](https://www.npmjs.com/package/prisma) and [`@prisma/client`](https://www.npmjs.com/package/@prisma/client) installed
 - PostgreSQL database (AWS RDS, Neon, Supabase, self-hosted, etc.)
 
 ## Setup
@@ -12,7 +12,7 @@ Implementation of `src/lib/db/purchases.ts` using Prisma ORM.
 Install if not already present:
 
 ```bash
-npm install prisma @prisma/client
+npm install prisma@^6 @prisma/client@^6
 npx prisma init
 ```
 
@@ -122,9 +122,24 @@ export async function updatePurchase(id: string, data: PurchaseUpdate) {
 export async function getPurchaseStatus(id: string) {
   const purchase = await prisma.purchase.findUnique({
     where: { id },
-    select: { id: true, status: true },
+    select: { id: true, status: true, total_amount: true },
   });
   return purchase;
+}
+
+export async function updatePurchaseStatusAtomically(
+  id: string,
+  expectedStatus: string,
+  data: PurchaseUpdate
+): Promise<boolean> {
+  const result = await prisma.purchase.updateMany({
+    where: { id, status: expectedStatus },
+    data: {
+      ...data,
+      updated_at: data.updated_at ? new Date(data.updated_at) : new Date(),
+    },
+  });
+  return result.count > 0;
 }
 
 export async function createPurchaseItems(

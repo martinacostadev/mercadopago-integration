@@ -124,9 +124,25 @@ The generated webhook handler includes HMAC-SHA256 verification using MercadoPag
 
 The checkout route includes a configurable `MAX_CHECKOUT_AMOUNT` server-side limit. Requests exceeding this amount are rejected before reaching MercadoPago. Adjust the limit per your business requirements.
 
+### Dependency verification
+
+Review all install commands before running them. Verify package names on [npmjs.com](https://www.npmjs.com/). Use `npm audit` after installation.
+
+| Package | Purpose | Registry | Weekly downloads |
+|---------|---------|----------|-----------------|
+| [mercadopago](https://www.npmjs.com/package/mercadopago) | Official MercadoPago Node.js SDK | npm | ~50k |
+| [zod](https://www.npmjs.com/package/zod) | Request validation | npm | ~20M |
+| [pg](https://www.npmjs.com/package/pg) | PostgreSQL client (raw SQL adapter) | npm | ~8M |
+| [prisma](https://www.npmjs.com/package/prisma) | ORM CLI (Prisma adapter) | npm | ~4M |
+| [@prisma/client](https://www.npmjs.com/package/@prisma/client) | Prisma runtime client (Prisma adapter) | npm | ~4M |
+
+### CSRF protection
+
+The checkout API route requires `Content-Type: application/json`, which triggers a CORS preflight on cross-origin requests — providing implicit CSRF protection for most setups. If your app uses cookie-based authentication (e.g. session cookies), add an explicit CSRF token (libraries: `csurf`, `next-csrf`, or a custom `X-CSRF-Token` header validated server-side).
+
 ## Prerequisites
 
-1. Install dependencies: `npm install mercadopago zod`
+1. Install dependencies: `npm install mercadopago@^2 zod@^3`
 2. Set environment variables (**never** prefix access token with `NEXT_PUBLIC_`):
    ```env
    MERCADOPAGO_ACCESS_TOKEN=TEST-xxxx   # from https://www.mercadopago.com/developers/panel/app
@@ -173,7 +189,8 @@ interface PurchaseUpdate {
 // Required exports:
 export async function createPurchase(data: PurchaseInsert): Promise<{ id: string }>;
 export async function updatePurchase(id: string, data: PurchaseUpdate): Promise<void>;
-export async function getPurchaseStatus(id: string): Promise<{ id: string; status: string } | null>;
+export async function getPurchaseStatus(id: string): Promise<{ id: string; status: string; total_amount: number | string | null } | null>;
+export async function updatePurchaseStatusAtomically(id: string, expectedStatus: string, data: PurchaseUpdate): Promise<boolean>;
 export async function createPurchaseItems(purchaseId: string, items: { item_id: string; price: number }[]): Promise<void>;
 ```
 
@@ -191,6 +208,15 @@ const client = new MercadoPagoConfig({
 const preference = new Preference(client);
 const payment = new Payment(client);
 
+/** Validate and normalize the base URL. Rejects non-http(s) protocols (e.g. javascript:, data:). */
+function validateBaseUrl(raw: string): string {
+  const parsed = new URL(raw);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Invalid base URL protocol: ${parsed.protocol}`);
+  }
+  return parsed.origin;
+}
+
 interface CreatePreferenceParams {
   items: { id: string; title: string; quantity: number; unit_price: number }[];
   purchaseId: string;
@@ -200,7 +226,7 @@ interface CreatePreferenceParams {
 export async function createPreference({
   items, purchaseId, buyerEmail,
 }: CreatePreferenceParams) {
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  const baseUrl = validateBaseUrl(process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000');
 
   return preference.create({
     body: {
@@ -250,13 +276,20 @@ import { z } from 'zod';
 
 const checkoutSchema = z.object({
   items: z.array(z.object({
-    id: z.string(),
-    title: z.string().min(1),
-    quantity: z.number().positive(),
+    id: z.string().max(255),
+    title: z.string().min(1).max(255),
+    quantity: z.number().int().positive().max(9999),
     unit_price: z.number().positive(),
-  })).min(1),
-  email: z.string().email().optional(),
+  })).min(1).max(100),
+  email: z.string().email().max(255).optional(),
 });
+
+// CSRF: JSON Content-Type triggers a CORS preflight, which blocks cross-origin POST.
+// If using cookie-based auth, add an explicit CSRF token (e.g. csurf, next-csrf).
+
+// Rate limiting: Apply at the infrastructure level (Vercel WAF, Cloudflare, nginx limit_req).
+// This endpoint creates DB rows and MP preferences — abuse can exhaust API quotas.
+// Recommended: ≤10 req/min per IP for checkout.
 
 export async function POST(request: Request) {
   try {
@@ -269,7 +302,8 @@ export async function POST(request: Request) {
     const { items, email } = validation.data;
     const totalAmount = items.reduce((sum, i) => sum + i.unit_price * i.quantity, 0);
 
-    const MAX_CHECKOUT_AMOUNT = 500_000; // Configure per business needs
+    // Configure per currency: e.g. 500_000 ARS, 50_000 BRL, 100_000 MXN, 200_000_000 COP, 50_000_000 CLP
+    const MAX_CHECKOUT_AMOUNT = 500_000;
     if (totalAmount > MAX_CHECKOUT_AMOUNT) {
       return NextResponse.json({ error: 'Amount exceeds maximum allowed' }, { status: 400 });
     }
@@ -294,7 +328,7 @@ export async function POST(request: Request) {
       purchaseId: purchase.id,
     });
   } catch (error) {
-    console.error('Checkout error:', error);
+    console.error('Checkout error:', error instanceof Error ? error.message : 'Unknown error');
     return NextResponse.json({ error: 'Checkout failed' }, { status: 500 });
   }
 }
@@ -306,16 +340,23 @@ export async function POST(request: Request) {
 
 ```typescript
 import { NextResponse } from 'next/server';
-import { createHmac } from 'crypto';
-import { getPurchaseStatus, updatePurchase } from '@/lib/db/purchases';
+import { createHmac, timingSafeEqual } from 'crypto';
+import { getPurchaseStatus, updatePurchaseStatusAtomically } from '@/lib/db/purchases';
 import { getPayment } from '@/lib/mercadopago/client';
 
+// Rate limiting: Apply at the infrastructure level (Vercel WAF, Cloudflare rate-limit rules,
+// AWS API Gateway throttling, or nginx limit_req). Recommended: ≤30 req/s per IP.
+
 const WEBHOOK_SECRET = process.env.MERCADOPAGO_WEBHOOK_SECRET;
-// WARNING: If MERCADOPAGO_WEBHOOK_SECRET is not set, webhook signature
-// verification is disabled. Set it in production to prevent forged requests.
 
 function verifyWebhookSignature(request: Request, body: string): boolean {
-  if (!WEBHOOK_SECRET) return true; // Skip verification if secret not configured
+  if (!WEBHOOK_SECRET) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('MERCADOPAGO_WEBHOOK_SECRET is required in production');
+    }
+    // In development, skip verification if secret not configured
+    return true;
+  }
 
   const xSignature = request.headers.get('x-signature');
   const xRequestId = request.headers.get('x-request-id');
@@ -342,7 +383,11 @@ function verifyWebhookSignature(request: Request, body: string): boolean {
     .update(template)
     .digest('hex');
 
-  return expected === hash;
+  // Timing-safe comparison to prevent timing attacks
+  const expectedBuf = Buffer.from(expected, 'hex');
+  const hashBuf = Buffer.from(hash, 'hex');
+  if (expectedBuf.length !== hashBuf.length) return false;
+  return timingSafeEqual(expectedBuf, hashBuf);
 }
 
 export async function POST(request: Request) {
@@ -366,18 +411,30 @@ export async function POST(request: Request) {
     const payment = await getPayment(paymentId.toString());
     if (!payment?.external_reference) return NextResponse.json({ received: true });
 
+    // Amount verification: reject if payment amount doesn't match stored amount
+    const existing = await getPurchaseStatus(payment.external_reference);
+    if (!existing) return NextResponse.json({ received: true });
+
+    if (
+      existing.total_amount != null &&
+      Number(payment.transaction_amount) !== Number(existing.total_amount)
+    ) {
+      console.error(
+        `Amount mismatch for purchase ${payment.external_reference}: ` +
+        `expected ${existing.total_amount}, got ${payment.transaction_amount}`
+      );
+      return NextResponse.json({ error: 'Amount mismatch' }, { status: 400 });
+    }
+
     let status: 'pending' | 'approved' | 'rejected' = 'pending';
     if (payment.status === 'approved') status = 'approved';
     else if (['rejected', 'cancelled', 'refunded'].includes(payment.status || '')) status = 'rejected';
 
-    // Idempotency: skip if already in terminal state
-    const existing = await getPurchaseStatus(payment.external_reference);
-    if (existing?.status === 'approved' || existing?.status === 'rejected') {
-      return NextResponse.json({ received: true });
-    }
-
     const payerEmail = payment.payer?.email;
-    await updatePurchase(payment.external_reference, {
+
+    // Atomic update: only updates if purchase is still in 'pending' state.
+    // Returns false (no-op) if already in a terminal state — prevents race conditions.
+    await updatePurchaseStatusAtomically(payment.external_reference, 'pending', {
       status,
       mercadopago_payment_id: paymentId.toString(),
       ...(payerEmail ? { user_email: payerEmail } : {}),
@@ -386,7 +443,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ received: true });
   } catch (error) {
-    console.error('Webhook error:', error);
+    console.error('Webhook error:', error instanceof Error ? error.message : 'Unknown error');
     // Always return 200 to prevent MercadoPago from retrying indefinitely
     return NextResponse.json({ received: true });
   }
@@ -566,6 +623,8 @@ export default function PaymentSuccessPage() {
 - [ ] `MERCADOPAGO_WEBHOOK_SECRET` configured
 - [ ] Webhook signature verification enabled
 - [ ] `MAX_CHECKOUT_AMOUNT` set per business rules
+- [ ] Webhook amount verification enabled (rejects mismatched `transaction_amount`)
+- [ ] Rate limiting configured at infrastructure level (Vercel WAF, Cloudflare, etc.)
 - [ ] All payment code reviewed before deployment
 
 ### Production Readiness
@@ -590,7 +649,7 @@ For detailed solutions, see `references/troubleshooting.md`.
 | Double purchase on double-click | Use `useRef` guard, not just `useState` |
 | Success page trusts redirect URL | Always verify via `/api/purchases/[id]` |
 | Webhook duplicate updates | Check if purchase is already terminal before updating |
-| Webhooks can't reach localhost | Use ngrok: `ngrok http 3000` |
+| Webhooks can't reach localhost | Use ngrok (dev only): `ngrok http 3000` |
 | `useSearchParams` error | Wrap component in `<Suspense>` |
 | Payment stuck in pending | Normal for offline methods (OXXO, Rapipago, Boleto) |
 | Mixed test/production credentials | Never mix - use all TEST or all PROD |
@@ -605,8 +664,6 @@ For detailed solutions, see `references/troubleshooting.md`.
 ### Configuration
 - `references/countries.md` - Currencies, test cards, payment methods by country
 - `references/testing.md` - Complete testing guide with test cards and simulated results
-- `references/mcp-server.md` - MercadoPago MCP Server for AI integration
-
 ### Help
 - `references/troubleshooting.md` - 20+ common errors and solutions
 - `references/usage-examples.md` - Ready-to-use prompt templates

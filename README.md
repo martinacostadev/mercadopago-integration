@@ -99,7 +99,6 @@ mercadopago-integration/
     troubleshooting.md                  # 20+ common errors and fixes
     testing.md                          # Complete testing guide
     countries.md                        # Currencies, test cards, payment methods
-    mcp-server.md                       # MercadoPago MCP Server documentation
     usage-examples.md                   # Ready-to-use prompts
   assets/
     migration.sql                       # Standard PostgreSQL schema template
