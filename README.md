@@ -91,8 +91,10 @@ See `mercadopago-integration/references/usage-examples.md` for more prompt templ
 
 ```
 mercadopago-integration/
-  SKILL.md                              # Main skill instructions
+  SKILL.md                              # Main skill instructions (no inline payment code)
   references/
+    server-implementation.md            # MercadoPago client, API routes, webhook handler
+    client-implementation.md            # Checkout hook, payment success page
     database-supabase.md                # Supabase DB helper
     database-prisma.md                  # Prisma DB helper
     database-postgresql.md              # Raw pg / Drizzle DB helper

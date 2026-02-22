@@ -12,13 +12,51 @@ description: >
   Argentine/Latin American payment processing, or checkout with MercadoPago. Supports
   all MercadoPago countries: Argentina (ARS), Brazil (BRL), Mexico (MXN), Colombia (COP),
   Chile (CLP), Peru (PEN), Uruguay (UYU).
-  This skill generates code for developer review — it does not execute financial
-  transactions directly. All payment code requires human approval before deployment.
+  This skill is a code-generation template — it does NOT execute financial transactions.
+  All generated code is presented for human review and requires explicit user approval
+  before being written to disk. Financial code templates are stored in reference files
+  and are never auto-executed.
 ---
 
 # MercadoPago Checkout Pro - Next.js Integration
 
 Redirect-based payment flow: buyer clicks "Pay", is redirected to MercadoPago, completes payment, returns to the app. A webhook confirms the payment status in the background.
+
+## Security Manifest
+
+### Financial Capability Declaration
+
+This skill generates code templates for integrating MercadoPago Checkout Pro. It does **NOT** execute any financial transactions directly. All financial code resides in reference files and is generated only after explicit user approval.
+
+| Capability | Type | Mitigation |
+|---|---|---|
+| Payment preference creation | Code template (not executed) | Human review required; sandbox credentials by default |
+| Webhook payment confirmation | Code template (not executed) | HMAC-SHA256 signature verification; atomic DB updates |
+| Payment status queries | Code template (read-only) | No state mutation; status verification only |
+| Amount validation | Code template (defensive) | Server-side ceiling; webhook amount cross-check |
+
+### Security Controls
+
+| Control | Implementation |
+|---|---|
+| Human-in-the-loop | All payment code presented for review before writing |
+| Sandbox by default | Generated code uses `TEST-xxxx` credentials |
+| Confirmation gates | Each step requires explicit user confirmation |
+| HMAC webhook verification | Timing-safe signature validation |
+| Atomic status updates | Prevents race conditions and duplicate processing |
+| Amount ceiling | Configurable `MAX_CHECKOUT_AMOUNT` per currency |
+| URL validation | Rejects `javascript:` and `data:` protocols |
+| CSRF protection | JSON Content-Type triggers CORS preflight |
+| Input validation | Zod schemas with size limits |
+
+### Confirmation Protocol
+
+At **each** implementation step that involves financial code, you **MUST**:
+
+1. Present the code from the relevant reference file to the user
+2. Explain what financial operations it performs
+3. Wait for explicit user confirmation before writing the file
+4. Never proceed to the next step without user approval
 
 ## Quick Start
 
@@ -196,325 +234,66 @@ export async function createPurchaseItems(purchaseId: string, items: { item_id: 
 
 ### Step 2: MercadoPago Client
 
+> **CONFIRMATION GATE**: Present the code to the user and explain that this module wraps the MercadoPago SDK to create checkout preferences (redirect URLs) and fetch payment details. Wait for explicit confirmation before writing.
+
 **Create:** `src/lib/mercadopago/client.ts`
 
-```typescript
-import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
+This module creates payment preferences (checkout sessions) and fetches payment details for webhook verification. It does not execute payments — MercadoPago handles the actual transaction on their hosted page.
 
-const client = new MercadoPagoConfig({
-  accessToken: process.env.MERCADOPAGO_ACCESS_TOKEN!,
-});
+Key functions:
+- `createPreference()` — Creates a checkout session with items, return URLs, and 24h expiration
+- `getPayment()` — Fetches payment details by ID (read-only, used by webhook)
 
-const preference = new Preference(client);
-const payment = new Payment(client);
-
-/** Validate and normalize the base URL. Rejects non-http(s) protocols (e.g. javascript:, data:). */
-function validateBaseUrl(raw: string): string {
-  const parsed = new URL(raw);
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`Invalid base URL protocol: ${parsed.protocol}`);
-  }
-  return parsed.origin;
-}
-
-interface CreatePreferenceParams {
-  items: { id: string; title: string; quantity: number; unit_price: number }[];
-  purchaseId: string;
-  buyerEmail?: string;
-}
-
-export async function createPreference({
-  items, purchaseId, buyerEmail,
-}: CreatePreferenceParams) {
-  const baseUrl = validateBaseUrl(process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000');
-
-  return preference.create({
-    body: {
-      items: items.map((item) => ({
-        id: item.id,
-        title: item.title,
-        quantity: item.quantity,
-        unit_price: item.unit_price,
-        currency_id: 'ARS', // Change per references/countries.md
-      })),
-      ...(buyerEmail ? { payer: { email: buyerEmail } } : {}),
-      back_urls: {
-        success: `${baseUrl}/payment-success?purchase=${purchaseId}`,
-        failure: `${baseUrl}/payment-failure?purchase=${purchaseId}`,
-        pending: `${baseUrl}/payment-success?purchase=${purchaseId}&status=pending`,
-      },
-      // CRITICAL: auto_return requires HTTPS. Omit on localhost or MP returns 400.
-      ...(baseUrl.startsWith('https') ? { auto_return: 'approved' as const } : {}),
-      external_reference: purchaseId,
-      notification_url: `${baseUrl}/api/webhooks/mercadopago`,
-      statement_descriptor: 'YOUR_BRAND', // Replace with user's brand (max 22 chars)
-      expires: true,
-      expiration_date_from: new Date().toISOString(),
-      expiration_date_to: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-    },
-    // Optional: Prevent duplicate preferences on retry
-    requestOptions: {
-      idempotencyKey: purchaseId,
-    },
-  });
-}
-
-export async function getPayment(paymentId: string) {
-  return payment.get({ id: paymentId });
-}
-```
+See `references/server-implementation.md` section **MercadoPago Client** for the complete implementation.
 
 ### Step 3: Checkout API Route
 
+> **CONFIRMATION GATE**: Present the code to the user and explain that this route validates the cart, creates a DB record, and returns a MercadoPago redirect URL. It does not charge the buyer — the buyer must approve payment on MercadoPago's page. Wait for explicit confirmation before writing.
+
 **Create:** `src/app/api/checkout/route.ts`
 
-```typescript
-import { NextResponse } from 'next/server';
-import { createPurchase, updatePurchase } from '@/lib/db/purchases';
-import { createPreference } from '@/lib/mercadopago/client';
-import { z } from 'zod';
+This route validates the cart via Zod, enforces `MAX_CHECKOUT_AMOUNT`, creates a purchase record, and returns a MercadoPago `init_point` URL. The buyer is then redirected to MercadoPago to approve the payment.
 
-const checkoutSchema = z.object({
-  items: z.array(z.object({
-    id: z.string().max(255),
-    title: z.string().min(1).max(255),
-    quantity: z.number().int().positive().max(9999),
-    unit_price: z.number().positive(),
-  })).min(1).max(100),
-  email: z.string().email().max(255).optional(),
-});
+Security features:
+- Zod input validation with size limits
+- Server-side amount ceiling (`MAX_CHECKOUT_AMOUNT`)
+- JSON Content-Type requirement (CSRF protection)
 
-// CSRF: JSON Content-Type triggers a CORS preflight, which blocks cross-origin POST.
-// If using cookie-based auth, add an explicit CSRF token (e.g. csurf, next-csrf).
-
-// Rate limiting: Apply at the infrastructure level (Vercel WAF, Cloudflare, nginx limit_req).
-// This endpoint creates DB rows and MP preferences — abuse can exhaust API quotas.
-// Recommended: ≤10 req/min per IP for checkout.
-
-export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-    const validation = checkoutSchema.safeParse(body);
-    if (!validation.success) {
-      return NextResponse.json({ error: 'Invalid request data' }, { status: 400 });
-    }
-
-    const { items, email } = validation.data;
-    const totalAmount = items.reduce((sum, i) => sum + i.unit_price * i.quantity, 0);
-
-    // Configure per currency: e.g. 500_000 ARS, 50_000 BRL, 100_000 MXN, 200_000_000 COP, 50_000_000 CLP
-    const MAX_CHECKOUT_AMOUNT = 500_000;
-    if (totalAmount > MAX_CHECKOUT_AMOUNT) {
-      return NextResponse.json({ error: 'Amount exceeds maximum allowed' }, { status: 400 });
-    }
-
-    const purchase = await createPurchase({
-      user_email: email || 'pending@checkout',
-      status: 'pending',
-      total_amount: totalAmount,
-    });
-
-    const mpPreference = await createPreference({
-      items, purchaseId: purchase.id, buyerEmail: email,
-    });
-
-    await updatePurchase(purchase.id, {
-      mercadopago_preference_id: mpPreference.id,
-    });
-
-    return NextResponse.json({
-      preferenceId: mpPreference.id,
-      initPoint: mpPreference.init_point,
-      purchaseId: purchase.id,
-    });
-  } catch (error) {
-    console.error('Checkout error:', error instanceof Error ? error.message : 'Unknown error');
-    return NextResponse.json({ error: 'Checkout failed' }, { status: 500 });
-  }
-}
-```
+See `references/server-implementation.md` section **Checkout API Route** for the complete implementation.
 
 ### Step 4: Webhook Handler
 
+> **CONFIRMATION GATE**: Present the code to the user and explain that this handler receives payment notifications from MercadoPago, verifies their authenticity via HMAC, and updates the purchase status in the database. Wait for explicit confirmation before writing.
+
 **Create:** `src/app/api/webhooks/mercadopago/route.ts`
 
-```typescript
-import { NextResponse } from 'next/server';
-import { createHmac, timingSafeEqual } from 'crypto';
-import { getPurchaseStatus, updatePurchaseStatusAtomically } from '@/lib/db/purchases';
-import { getPayment } from '@/lib/mercadopago/client';
+This handler receives asynchronous payment notifications from MercadoPago. It verifies the HMAC-SHA256 signature, fetches payment details, validates the amount against the stored record, and atomically updates the purchase status.
 
-// Rate limiting: Apply at the infrastructure level (Vercel WAF, Cloudflare rate-limit rules,
-// AWS API Gateway throttling, or nginx limit_req). Recommended: ≤30 req/s per IP.
+Security features:
+- HMAC-SHA256 signature verification (timing-safe)
+- Amount cross-check (rejects mismatched payments)
+- Atomic status updates (prevents race conditions)
+- Idempotent (no-op if already in terminal state)
 
-const WEBHOOK_SECRET = process.env.MERCADOPAGO_WEBHOOK_SECRET;
-
-function verifyWebhookSignature(request: Request, body: string): boolean {
-  if (!WEBHOOK_SECRET) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('MERCADOPAGO_WEBHOOK_SECRET is required in production');
-    }
-    // In development, skip verification if secret not configured
-    return true;
-  }
-
-  const xSignature = request.headers.get('x-signature');
-  const xRequestId = request.headers.get('x-request-id');
-  if (!xSignature || !xRequestId) return false;
-
-  // Parse ts and v1 from x-signature header
-  const parts = Object.fromEntries(
-    xSignature.split(',').map((part) => {
-      const [key, ...rest] = part.trim().split('=');
-      return [key, rest.join('=')];
-    })
-  );
-  const ts = parts['ts'];
-  const hash = parts['v1'];
-  if (!ts || !hash) return false;
-
-  // Parse data.id from body
-  const parsed = JSON.parse(body);
-  const dataId = parsed?.data?.id;
-
-  // Build the template string per MercadoPago docs
-  const template = `id:${dataId};request-id:${xRequestId};ts:${ts};`;
-  const expected = createHmac('sha256', WEBHOOK_SECRET)
-    .update(template)
-    .digest('hex');
-
-  // Timing-safe comparison to prevent timing attacks
-  const expectedBuf = Buffer.from(expected, 'hex');
-  const hashBuf = Buffer.from(hash, 'hex');
-  if (expectedBuf.length !== hashBuf.length) return false;
-  return timingSafeEqual(expectedBuf, hashBuf);
-}
-
-export async function POST(request: Request) {
-  try {
-    const rawBody = await request.text();
-
-    if (!verifyWebhookSignature(request, rawBody)) {
-      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
-    }
-
-    const body = JSON.parse(rawBody);
-
-    // Handle both IPN and webhook formats
-    if (body.type !== 'payment' && body.action !== 'payment.created' && body.action !== 'payment.updated') {
-      return NextResponse.json({ received: true });
-    }
-
-    const paymentId = body.data?.id;
-    if (!paymentId) return NextResponse.json({ received: true });
-
-    const payment = await getPayment(paymentId.toString());
-    if (!payment?.external_reference) return NextResponse.json({ received: true });
-
-    // Amount verification: reject if payment amount doesn't match stored amount
-    const existing = await getPurchaseStatus(payment.external_reference);
-    if (!existing) return NextResponse.json({ received: true });
-
-    if (
-      existing.total_amount != null &&
-      Number(payment.transaction_amount) !== Number(existing.total_amount)
-    ) {
-      console.error(
-        `Amount mismatch for purchase ${payment.external_reference}: ` +
-        `expected ${existing.total_amount}, got ${payment.transaction_amount}`
-      );
-      return NextResponse.json({ error: 'Amount mismatch' }, { status: 400 });
-    }
-
-    let status: 'pending' | 'approved' | 'rejected' = 'pending';
-    if (payment.status === 'approved') status = 'approved';
-    else if (['rejected', 'cancelled', 'refunded'].includes(payment.status || '')) status = 'rejected';
-
-    const payerEmail = payment.payer?.email;
-
-    // Atomic update: only updates if purchase is still in 'pending' state.
-    // Returns false (no-op) if already in a terminal state — prevents race conditions.
-    await updatePurchaseStatusAtomically(payment.external_reference, 'pending', {
-      status,
-      mercadopago_payment_id: paymentId.toString(),
-      ...(payerEmail ? { user_email: payerEmail } : {}),
-      updated_at: new Date().toISOString(),
-    });
-
-    return NextResponse.json({ received: true });
-  } catch (error) {
-    console.error('Webhook error:', error instanceof Error ? error.message : 'Unknown error');
-    // Always return 200 to prevent MercadoPago from retrying indefinitely
-    return NextResponse.json({ received: true });
-  }
-}
-
-// GET endpoint for MercadoPago verification pings
-export async function GET() {
-  return NextResponse.json({ status: 'ok' });
-}
-```
+See `references/server-implementation.md` section **Webhook Handler** for the complete implementation.
 
 ### Step 5: Purchase Status API
 
+> **CONFIRMATION GATE**: Present the code to the user. This is a read-only endpoint that returns purchase status. Wait for confirmation before writing.
+
 **Create:** `src/app/api/purchases/[id]/route.ts`
 
-```typescript
-import { NextResponse } from 'next/server';
-import { getPurchaseStatus } from '@/lib/db/purchases';
+Read-only endpoint that returns the purchase status. Used by the success page for server-side verification. No financial operations.
 
-export async function GET(
-  _request: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-  const data = await getPurchaseStatus(id);
-
-  if (!data) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  return NextResponse.json({ id: data.id, status: data.status });
-}
-```
+See `references/server-implementation.md` section **Purchase Status API** for the complete implementation.
 
 ### Step 6: Checkout Hook (Frontend)
 
 **Create:** `src/hooks/useCheckout.ts`
 
-Double-click prevention uses `useRef` (survives re-renders, unlike `useState`).
+Client-side hook that sends the cart to `/api/checkout` and redirects to MercadoPago. Includes `useRef` double-click guard.
 
-```typescript
-'use client';
-import { useCallback, useRef, useState } from 'react';
-
-export function useCheckout() {
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const guard = useRef(false);
-
-  const submitCheckout = useCallback(async (items: unknown[]) => {
-    if (guard.current) return;
-    setError(null);
-    guard.current = true;
-    setIsSubmitting(true);
-    try {
-      const res = await fetch('/api/checkout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Checkout failed');
-      if (data.initPoint) window.location.href = data.initPoint;
-      else throw new Error('No payment link returned');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unknown error');
-      setIsSubmitting(false);
-      guard.current = false;
-    }
-  }, []);
-
-  return { submitCheckout, isSubmitting, error };
-}
-```
+See `references/client-implementation.md` section **Checkout Hook** for the complete implementation.
 
 ### Step 7: Success Page with Verification
 
@@ -523,75 +302,7 @@ export function useCheckout() {
 Always verify purchase status server-side. Never trust the redirect URL alone.
 Wrap `useSearchParams` in `<Suspense>` (Next.js App Router requirement).
 
-```tsx
-'use client';
-import { useSearchParams } from 'next/navigation';
-import { Suspense, useCallback, useEffect, useState } from 'react';
-
-type Status = 'loading' | 'approved' | 'pending' | 'rejected' | 'error';
-
-function PaymentResult() {
-  const purchaseId = useSearchParams().get('purchase');
-  const [status, setStatus] = useState<Status>(purchaseId ? 'loading' : 'approved');
-
-  const verify = useCallback(async (id: string) => {
-    try {
-      const res = await fetch(`/api/purchases/${id}`);
-      if (!res.ok) { setStatus('error'); return; }
-      const { status } = await res.json();
-      setStatus(status === 'approved' ? 'approved'
-        : status === 'pending' ? 'pending' : 'rejected');
-    } catch { setStatus('error'); }
-  }, []);
-
-  useEffect(() => { if (purchaseId) verify(purchaseId); }, [purchaseId, verify]);
-
-  if (status === 'loading') {
-    return <div>Verifying payment...</div>;
-  }
-
-  if (status === 'approved') {
-    return (
-      <div>
-        <h1>Payment Successful!</h1>
-        <p>Thank you for your purchase.</p>
-      </div>
-    );
-  }
-
-  if (status === 'pending') {
-    return (
-      <div>
-        <h1>Payment Pending</h1>
-        <p>Your payment is being processed.</p>
-        <p>You'll receive an email when confirmed.</p>
-        <p>This may take 1-3 business days for offline payment methods.</p>
-      </div>
-    );
-  }
-
-  if (status === 'rejected') {
-    return (
-      <div>
-        <h1>Payment Failed</h1>
-        <p>Your payment could not be processed.</p>
-        <p>Please try again or use a different payment method.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div>
-      <h1>Error</h1>
-      <p>Could not verify payment status. Please contact support.</p>
-    </div>
-  );
-}
-
-export default function PaymentSuccessPage() {
-  return <Suspense fallback={<div>Loading...</div>}><PaymentResult /></Suspense>;
-}
-```
+See `references/client-implementation.md` section **Success Page with Server-Side Verification** for the complete implementation.
 
 ## Checklist
 
@@ -655,6 +366,10 @@ For detailed solutions, see `references/troubleshooting.md`.
 | Mixed test/production credentials | Never mix - use all TEST or all PROD |
 
 ## References
+
+### Implementation Templates
+- `references/server-implementation.md` - MercadoPago client, checkout route, webhook handler, purchase status API
+- `references/client-implementation.md` - Checkout hook, payment success page
 
 ### Database Adapters
 - `references/database-supabase.md` - Supabase DB helper implementation
