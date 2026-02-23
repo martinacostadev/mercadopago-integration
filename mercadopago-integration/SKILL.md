@@ -24,6 +24,25 @@ Redirect-based payment flow: buyer clicks "Pay", is redirected to MercadoPago, c
 
 ## Security Manifest
 
+### W009 Mitigation — Direct Money Access (Payment Gateway)
+
+**Scanner finding**: W009 flags this skill because it contains payment-gateway code (MercadoPago SDK, `createPreference`, `getPayment`, `/api/checkout`, webhook handler).
+
+**Mitigation**: This skill is a **code-generation template**. It never executes financial transactions autonomously. Every piece of payment code lives in reference files and is presented to the user for explicit review before being written to disk. The confirmation protocol below is mandatory for each financial code step.
+
+The generated code templates themselves include defense-in-depth controls to reduce risk once deployed:
+
+| Threat | Control in generated code |
+|---|---|
+| Forged webhook | HMAC-SHA256 signature verification (timing-safe); secret required in all environments (fail-closed — no dev bypass) |
+| Replay attack | Webhook `ts` timestamp freshness check; rejects requests older than 5 minutes |
+| Malformed payment ID | Numeric format validation (`/^\d{1,20}$/`) before passing to SDK |
+| Inflated amounts | Server-side `MAX_CHECKOUT_AMOUNT` ceiling; webhook `transaction_amount` cross-check against DB record |
+| Race conditions / double-processing | Atomic DB update guarded by expected `pending` status |
+| Oversized / malformed input | Zod schemas with field-level size limits on all checkout inputs |
+| URL injection | `validateBaseUrl()` rejects non-http(s) protocols (e.g. `javascript:`, `data:`) |
+| CSRF | JSON `Content-Type` requirement triggers CORS preflight on cross-origin requests |
+
 ### Financial Capability Declaration
 
 This skill generates code templates for integrating MercadoPago Checkout Pro. It does **NOT** execute any financial transactions directly. All financial code resides in reference files and is generated only after explicit user approval.
@@ -31,7 +50,7 @@ This skill generates code templates for integrating MercadoPago Checkout Pro. It
 | Capability | Type | Mitigation |
 |---|---|---|
 | Payment preference creation | Code template (not executed) | Human review required; sandbox credentials by default |
-| Webhook payment confirmation | Code template (not executed) | HMAC-SHA256 signature verification; atomic DB updates |
+| Webhook payment confirmation | Code template (not executed) | HMAC-SHA256 + replay-attack protection; atomic DB updates |
 | Payment status queries | Code template (read-only) | No state mutation; status verification only |
 | Amount validation | Code template (defensive) | Server-side ceiling; webhook amount cross-check |
 
@@ -42,7 +61,9 @@ This skill generates code templates for integrating MercadoPago Checkout Pro. It
 | Human-in-the-loop | All payment code presented for review before writing |
 | Sandbox by default | Generated code uses `TEST-xxxx` credentials |
 | Confirmation gates | Each step requires explicit user confirmation |
-| HMAC webhook verification | Timing-safe signature validation |
+| HMAC webhook verification | Timing-safe signature validation; fail-closed (no bypass) |
+| Replay-attack protection | Webhook timestamp checked; requests older than 5 min rejected |
+| Payment ID validation | Numeric format check before passing to SDK |
 | Atomic status updates | Prevents race conditions and duplicate processing |
 | Amount ceiling | Configurable `MAX_CHECKOUT_AMOUNT` per currency |
 | URL validation | Rejects `javascript:` and `data:` protocols |

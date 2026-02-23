@@ -172,13 +172,15 @@ import { getPayment } from '@/lib/mercadopago/client';
 
 const WEBHOOK_SECRET = process.env.MERCADOPAGO_WEBHOOK_SECRET;
 
+// Reject webhooks whose timestamp is older than this — prevents replay attacks.
+const MAX_WEBHOOK_AGE_SECONDS = 300; // 5 minutes
+
 function verifyWebhookSignature(request: Request, body: string): boolean {
+  // Fail-closed: always reject if the secret is not configured.
+  // Set MERCADOPAGO_WEBHOOK_SECRET in every environment, including development
+  // (any non-empty string works in dev; use the real secret in staging/production).
   if (!WEBHOOK_SECRET) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('MERCADOPAGO_WEBHOOK_SECRET is required in production');
-    }
-    // In development, skip verification if secret not configured
-    return true;
+    throw new Error('MERCADOPAGO_WEBHOOK_SECRET is not configured');
   }
 
   const xSignature = request.headers.get('x-signature');
@@ -195,6 +197,12 @@ function verifyWebhookSignature(request: Request, body: string): boolean {
   const ts = parts['ts'];
   const hash = parts['v1'];
   if (!ts || !hash) return false;
+
+  // Reject stale or replayed webhooks
+  const webhookAgeSeconds = Math.floor(Date.now() / 1000) - parseInt(ts, 10);
+  if (isNaN(webhookAgeSeconds) || webhookAgeSeconds < 0 || webhookAgeSeconds > MAX_WEBHOOK_AGE_SECONDS) {
+    return false;
+  }
 
   // Parse data.id from body
   const parsed = JSON.parse(body);
@@ -231,7 +239,12 @@ export async function POST(request: Request) {
     const paymentId = body.data?.id;
     if (!paymentId) return NextResponse.json({ received: true });
 
-    const payment = await getPayment(paymentId.toString());
+    // Validate format: MercadoPago payment IDs are numeric strings (1–20 digits).
+    // Reject anything else before it reaches the SDK / external API.
+    const paymentIdStr = String(paymentId);
+    if (!/^\d{1,20}$/.test(paymentIdStr)) return NextResponse.json({ received: true });
+
+    const payment = await getPayment(paymentIdStr);
     if (!payment?.external_reference) return NextResponse.json({ received: true });
 
     // Amount verification: reject if payment amount doesn't match stored amount
