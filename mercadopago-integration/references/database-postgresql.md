@@ -1,4 +1,4 @@
-# Database Helper - Raw PostgreSQL
+﻿# Database Helper - Raw PostgreSQL
 
 Implementation of `src/lib/db/purchases.ts` using `pg` (node-postgres) directly. Adapt for Drizzle, Kysely, or any other query builder.
 
@@ -45,8 +45,8 @@ interface PurchaseInsert {
 
 interface PurchaseUpdate {
   status?: 'pending' | 'approved' | 'rejected';
-  mercadopago_payment_id?: string;
-  mercadopago_preference_id?: string;
+  provider_payment_id?: string;
+  provider_preference_id?: string;
   user_email?: string;
   updated_at?: string;
 }
@@ -63,7 +63,7 @@ export async function createPurchase(data: PurchaseInsert) {
 
 // Whitelist of columns allowed in dynamic UPDATE queries to prevent SQL injection via key names.
 const ALLOWED_UPDATE_COLUMNS = new Set<string>([
-  'status', 'mercadopago_payment_id', 'mercadopago_preference_id', 'user_email', 'updated_at',
+  'status', 'provider_payment_id', 'provider_preference_id', 'user_email', 'updated_at',
 ]);
 
 function buildUpdateFields(data: PurchaseUpdate) {
@@ -152,8 +152,8 @@ import { sql } from 'drizzle-orm';
 export const purchases = pgTable('purchases', {
   id: uuid('id').primaryKey().defaultRandom(),
   user_email: varchar('user_email', { length: 255 }).notNull(),
-  mercadopago_payment_id: varchar('mercadopago_payment_id'),
-  mercadopago_preference_id: varchar('mercadopago_preference_id'),
+  provider_payment_id: varchar('provider_payment_id'),
+  provider_preference_id: varchar('provider_preference_id'),
   status: varchar('status', { length: 20 }).notNull().default('pending'),
   total_amount: numeric('total_amount', { precision: 10, scale: 2 }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow(),
@@ -203,3 +203,4 @@ export async function createPurchaseItems(purchaseId: string, items: { item_id: 
   await db.insert(purchaseItems).values(items.map((item) => ({ purchase_id: purchaseId, ...item })));
 }
 ```
+

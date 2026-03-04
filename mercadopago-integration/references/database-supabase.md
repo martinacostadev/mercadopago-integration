@@ -1,4 +1,4 @@
-# Database Helper - Supabase
+﻿# Database Helper - Supabase
 
 Implementation of `src/lib/db/purchases.ts` using Supabase client.
 
@@ -29,8 +29,8 @@ interface PurchaseInsert {
 
 interface PurchaseUpdate {
   status?: 'pending' | 'approved' | 'rejected';
-  mercadopago_payment_id?: string;
-  mercadopago_preference_id?: string;
+  provider_payment_id?: string;
+  provider_preference_id?: string;
   user_email?: string;
   updated_at?: string;
 }
@@ -142,3 +142,4 @@ CREATE POLICY "Users can view own purchases"
 -- Service role bypasses RLS (used by API routes)
 -- No additional policy needed when using createServiceClient with service_role key
 ```
+

@@ -1,4 +1,4 @@
-# Database Helper - Prisma
+﻿# Database Helper - Prisma
 
 Implementation of `src/lib/db/purchases.ts` using Prisma ORM.
 
@@ -30,8 +30,8 @@ Add to `prisma/schema.prisma`:
 model Purchase {
   id                       String         @id @default(uuid()) @db.Uuid
   user_email               String         @db.VarChar(255)
-  mercadopago_payment_id   String?
-  mercadopago_preference_id String?
+  provider_payment_id   String?
+  provider_preference_id String?
   status                   String         @default("pending") @db.VarChar(20)
   total_amount             Decimal?       @db.Decimal(10, 2)
   created_at               DateTime       @default(now()) @db.Timestamptz()
@@ -40,7 +40,7 @@ model Purchase {
 
   @@index([user_email])
   @@index([status])
-  @@index([mercadopago_payment_id])
+  @@index([provider_payment_id])
   @@map("purchases")
 }
 
@@ -91,8 +91,8 @@ interface PurchaseInsert {
 
 interface PurchaseUpdate {
   status?: 'pending' | 'approved' | 'rejected';
-  mercadopago_payment_id?: string;
-  mercadopago_preference_id?: string;
+  provider_payment_id?: string;
+  provider_preference_id?: string;
   user_email?: string;
   updated_at?: string;
 }
@@ -155,3 +155,4 @@ export async function createPurchaseItems(
   });
 }
 ```
+
