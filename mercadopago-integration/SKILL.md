@@ -51,3 +51,4 @@ If a user asks for any of the above, stop and provide a security handoff note.
 - `references/testing.md`
 - `references/troubleshooting.md`
 - `references/usage-examples.md`
+- `SECURITY.md` — accepted risk documentation (W009)
